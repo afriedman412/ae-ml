@@ -1,13 +1,17 @@
 import logging
 import random
 import pickle
+import os
 
 import numpy as np
 import pandas as pd
 
 from sklearn.linear_model import LogisticRegression as LR
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import confusion_matrix
 from sklearn.datasets import load_iris
+from sklearn.model_selection import train_test_split, cross_validate
+
 
 from flask import Flask
 from flask import jsonify
@@ -17,7 +21,6 @@ MODEL_NAME = 'iris_LR'
 TRAIN_PCT = 0.7
 
 app = Flask(__name__)
-
 
 @app.route('/')
 def home():
@@ -35,43 +38,91 @@ def ok():
 def train_model():
     """Train simple model, save as pickle file."""
 
-    # load iris through the scikit module
-    logging.info('[main.train_model] getting iris dataframe')
-    df = get_iris()
-
-    # shuffle dataset
-    df = df.sample(frac=1).reset_index(drop=True)
-
     # perform train/test split
-    split_pt = int(TRAIN_PCT * len(df))
-
-    train_x = df[:split_pt].drop(u'target', 1)  # training features
-    train_y = df[:split_pt].target  # training target
-
-    test_x = df[split_pt:].drop(u'target', 1)  # test features
-    test_y = df[split_pt:].target  # test target
+    X_train, X_test, y_train, y_test = import_tts()
 
     # fit the model to the dataset
-    logging.info('[main.train_model] fitting model for %s rows', len(train_x))
+    logging.info('[main.train_model] fitting model for %s rows', len(X_train))
     model = LR()
-    model.fit(train_x, train_y)
+    model.fit(X_train, y_train)
 
-    predicted_y = model.predict(test_x)
-    cm = confusion_matrix(test_y, predicted_y)
+    # cross validate
+    cv = cross_val(model, X_train, y_train)
 
+    # generate confusion matrix from predictions
+    y_pred = model.predict(X_test)
+    cm = confusion_matrix(y_test, y_pred)
+    
     model_outputs = {
-        'confusion_matrix': cm.__str__(),
-        'accuracy': model.score(test_x, test_y),
+        'algorithm': 'Logistic Regression',
+        'raw_accuracy': model.score(X_test, y_test),
+        'cross_val_train_acc': np.mean(cv['train_score']),
+        'cross_val_test_acc': np.mean(cv['test_score']),
         'coeffs': model.coef_[0].__str__(),
-
+        'confusion_matrix': cm.__str__()
     }
 
     logging.info('[main.train_model] model_outputs - %s', model_outputs)
 
+    # save model
     filename = '{model_name}.pkl'.format(model_name='iris_LR')
     pickle.dump(model, open(filename, 'wb'))
 
     return jsonify(model_outputs)
+
+@app.route('/train_RFC')
+def train_RFC():
+
+    # perform train/test split
+    X_train, X_test, y_train, y_test = import_tts()
+
+    # fit the model to the dataset
+    logging.info('[main.train_RFC] fitting RFC for %s rows', len(X_train))
+    rfc = RandomForestClassifier()
+    rfc.fit(X_train, y_train)
+
+    # cross validate
+    cv = cross_val(rfc, X_train, y_train)
+
+    # generate confusion matrix from predictions
+    y_pred = rfc.predict(X_test)
+    cm = confusion_matrix(y_test, y_pred)
+
+    rfc_outputs = {
+        'algorithm': 'Random Forest',
+        'raw_accuracy': rfc.score(X_test, y_test),
+        'cross_val_train_acc': np.mean(cv['train_score']),
+        'cross_val_test_acc': np.mean(cv['test_score']),
+        'confusion_matrix': cm.__str__()
+    }
+
+    logging.info('[main.train_RFC] rfc_outputs - %s', rfc_outputs)
+
+    # save model
+    filename = '{model_name}.pkl'.format(model_name='iris_RFC')
+    pickle.dump(rfc, open(filename, 'wb'))
+
+    return jsonify(rfc_outputs)
+
+def import_tts(df=None, train_size=TRAIN_PCT):
+    """
+    Import iris data, train/test split using TRAIN_PCT
+    """
+    if df is None:
+        logging.info('[main.import_tts] getting iris dataframe')
+        df = get_iris()
+
+    # define feature set
+    X = df.drop('target', 1)
+    y = df['target']
+
+    X_train, X_test, y_train, y_test = train_test_split(X, y, train_size=train_size)
+
+    return (X_train, X_test, y_train, y_test)
+
+def cross_val(model, X, y, k=3):
+    cv = cross_validate(model, X, y, cv=k, return_train_score=True)
+    return cv
 
 
 @app.route('/predict_random', methods=['GET'])
@@ -96,9 +147,26 @@ def predict_random():
     return jsonify({'predicted_class': prediction[0]})
 
 
-def predict(data, features):
+@app.route('/predict_RFC', methods=['GET'])
+def predict_RFC():
+
+    features = ['sepal_length', 'sepal_width', 'petal_length', 'petal_width']
+    data = [[get_rand_float() for x in range(len(features))]]
+
+    logging.info('[predict_RFC] %s ', data)
+
+    try:
+        prediction = predict(data, features, 'iris_RFC')
+    except Exception as err:
+        logging.error('[predict_RFC] err - %s ', err)
+        return jsonify({'err': 'err'})
+
+    return jsonify({'predicted_class': prediction[0]})
+
+
+def predict(data, features, model=MODEL_NAME):
     """load the model from disk, make the prediction"""
-    filename = '{model_name}.pkl'.format(model_name=MODEL_NAME)
+    filename = '{model_name}.pkl'.format(model_name=model)
     loaded_model = pickle.load(open(filename, 'rb'))
 
     test_df = pd.DataFrame(data, columns=features)
